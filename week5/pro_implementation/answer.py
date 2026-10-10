@@ -5,18 +5,28 @@ from litellm import completion
 from pydantic import BaseModel, Field
 from pathlib import Path
 from tenacity import retry, wait_exponential
+from langchain_huggingface import HuggingFaceEmbeddings
 
 
 load_dotenv(override=True)
 
+## OpenAI Models
 # MODEL = "openai/gpt-4.1-nano"
-MODEL = "groq/openai/gpt-oss-120b"
+# MODEL = "groq/openai/gpt-oss-120b"
+
+## Local Model
+MODEL = "openai/unsloth/gemma-4-E4B-it-GGUF:Q4_K_M"
+
+## Llama-server Base URL
+BASE_URL = "http://127.0.0.1:8080/"
+
 DB_NAME = str(Path(__file__).parent.parent / "preprocessed_db")
 KNOWLEDGE_BASE_PATH = Path(__file__).parent.parent / "knowledge-base"
 SUMMARIES_PATH = Path(__file__).parent.parent / "summaries"
 
 collection_name = "docs"
-embedding_model = "text-embedding-3-large"
+# embedding_model = "text-embedding-3-large"
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 wait = wait_exponential(multiplier=1, min=10, max=240)
 
 openai = OpenAI()
@@ -68,7 +78,7 @@ Reply only with the list of ranked chunk ids, nothing else. Include all the chun
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    response = completion(model=MODEL, messages=messages, response_format=RankOrder)
+    response = completion(model=MODEL, messages=messages, response_format=RankOrder, api_base = BASE_URL)
     reply = response.choices[0].message.content
     order = RankOrder.model_validate_json(reply).order
     return [chunks[i - 1] for i in order]
@@ -113,7 +123,7 @@ user: What role covers? -> Query: What role FooBar covers?
 
 IMPORTANT: Respond ONLY with the precise knowledgebase query, nothing else.
 """
-    response = completion(model=MODEL, messages=[{"role": "system", "content": message}])
+    response = completion(model=MODEL, messages=[{"role": "system", "content": message}], api_base=BASE_URL)
     return response.choices[0].message.content
 
 
@@ -126,8 +136,16 @@ def merge_chunks(chunks, reranked):
     return merged
 
 
+# def fetch_context_unranked(question):
+#     query = openai.embeddings.create(model=embedding_model, input=[question]).data[0].embedding
+#     results = collection.query(query_embeddings=[query], n_results=RETRIEVAL_K)
+#     chunks = []
+#     for result in zip(results["documents"][0], results["metadatas"][0]):
+#         chunks.append(Result(page_content=result[0], metadata=result[1]))
+#     return chunks
+
 def fetch_context_unranked(question):
-    query = openai.embeddings.create(model=embedding_model, input=[question]).data[0].embedding
+    query = embeddings.embed_query(question)
     results = collection.query(query_embeddings=[query], n_results=RETRIEVAL_K)
     chunks = []
     for result in zip(results["documents"][0], results["metadatas"][0]):
@@ -152,5 +170,5 @@ def answer_question(question: str, history: list[dict] = []) -> tuple[str, list]
     """
     chunks = fetch_context(question, history)
     messages = make_rag_messages(question, history, chunks)
-    response = completion(model=MODEL, messages=messages)
+    response = completion(model=MODEL, messages=messages, api_base=BASE_URL)
     return response.choices[0].message.content, chunks

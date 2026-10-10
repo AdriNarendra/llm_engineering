@@ -7,15 +7,23 @@ from tqdm import tqdm
 from litellm import completion
 from multiprocessing import Pool
 from tenacity import retry, wait_exponential
+from langchain_huggingface import HuggingFaceEmbeddings
 
 
 load_dotenv(override=True)
 
-MODEL = "openai/gpt-4.1-nano"
+# MODEL = "openai/gpt-4.1-nano"
+
+## Local Model
+MODEL = "openai/unsloth/gemma-4-E4B-it-GGUF:Q4_K_M"
+
+## LLama-server Base URL
+BASE_URL = "http://127.0.0.1:8080/"
 
 DB_NAME = str(Path(__file__).parent.parent / "preprocessed_db")
 collection_name = "docs"
-embedding_model = "text-embedding-3-large"
+# embedding_model = "text-embedding-3-large"
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 KNOWLEDGE_BASE_PATH = Path(__file__).parent.parent / "knowledge-base"
 AVERAGE_CHUNK_SIZE = 100
 wait = wait_exponential(multiplier=1, min=10, max=240)
@@ -103,7 +111,7 @@ def make_messages(document):
 @retry(wait=wait)
 def process_document(document):
     messages = make_messages(document)
-    response = completion(model=MODEL, messages=messages, response_format=Chunks)
+    response = completion(model=MODEL, messages=messages, response_format=Chunks, api_base=BASE_URL)
     reply = response.choices[0].message.content
     doc_as_chunks = Chunks.model_validate_json(reply).chunks
     return [chunk.as_result(document) for chunk in doc_as_chunks]
@@ -121,26 +129,54 @@ def create_chunks(documents):
     return chunks
 
 
+# def create_embeddings(chunks):
+#     chroma = PersistentClient(path=DB_NAME)
+#     if collection_name in [c.name for c in chroma.list_collections()]:
+#         chroma.delete_collection(collection_name)
+
+#     texts = [chunk.page_content for chunk in chunks]
+#     emb = openai.embeddings.create(model=embedding_model, input=texts).data
+#     vectors = [e.embedding for e in emb]
+
+#     collection = chroma.get_or_create_collection(collection_name)
+
+#     ids = [str(i) for i in range(len(chunks))]
+#     metas = [chunk.metadata for chunk in chunks]
+
+#     collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metas)
+#     print(f"Vectorstore created with {collection.count()} documents")
+
 def create_embeddings(chunks):
     chroma = PersistentClient(path=DB_NAME)
+
     if collection_name in [c.name for c in chroma.list_collections()]:
         chroma.delete_collection(collection_name)
 
     texts = [chunk.page_content for chunk in chunks]
-    emb = openai.embeddings.create(model=embedding_model, input=texts).data
-    vectors = [e.embedding for e in emb]
+
+    # Generate local Hugging Face embeddings
+    vectors = embeddings.embed_documents(texts)
 
     collection = chroma.get_or_create_collection(collection_name)
 
     ids = [str(i) for i in range(len(chunks))]
     metas = [chunk.metadata for chunk in chunks]
 
-    collection.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metas)
+    collection.add(
+        ids=ids,
+        embeddings=vectors,
+        documents=texts,
+        metadatas=metas,
+    )
+
     print(f"Vectorstore created with {collection.count()} documents")
 
 
 if __name__ == "__main__":
+    print("Fetching documents from knowledge base...")
     documents = fetch_documents()
+    print("Creating chunks from documents...")
     chunks = create_chunks(documents)
+    print(f"Created {len(chunks)} chunks from {len(documents)} documents")
     create_embeddings(chunks)
     print("Ingestion complete")
